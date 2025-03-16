@@ -174,11 +174,15 @@ class WanI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
         """
+        # 这个应该是为了跟归一化之后统一
         img = TF.to_tensor(img).sub_(0.5).div_(0.5).to(self.device)
 
+        # 帧数等于视频时长（s）乘以 fps，generate.py 里默认是 16 fps 和 5 秒视频长度，应该两个都可以改
         F = frame_num
         h, w = img.shape[1:]
         aspect_ratio = h / w
+
+        # latent presentation 的尺寸 
         lat_h = round(
             np.sqrt(max_area * aspect_ratio) // self.vae_stride[1] //
             self.patch_size[1] * self.patch_size[1])
@@ -195,6 +199,9 @@ class WanI2V:
         seed = seed if seed >= 0 else random.randint(0, sys.maxsize)
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
+
+        # latent presentation 的尺寸，前两个维度的大小，为什么固定是 16 和 21？
+        # 看起来是噪声的 latent presentation，完全随机的
         noise = torch.randn(
             16,
             21,
@@ -234,15 +241,21 @@ class WanI2V:
         if offload_model:
             self.clip.model.cpu()
 
+        # VAE 的输入和输出就直接是一个图片序列，也就是视频
+        # 所以 DiT 模型的输入和输出应该也是一个视频序列的 latent presentation
         y = self.vae.encode([
+            # 把输入图片直接添加到了视频序列的第一帧
             torch.concat([
                 torch.nn.functional.interpolate(
+                    # 这里 transpos 转置了一下第 0 和第 1 维，变成了视频中的帧表示
                     img[None].cpu(), size=(h, w), mode='bicubic').transpose(
                         0, 1),
+                # 其他视频帧的输入初始化为全 0 
                 torch.zeros(3, 80, h, w)
             ],
                          dim=1).to(self.device)
         ])[0]
+        # TODO：这个 mask 的作用暂时没有看太懂，需要搞清楚 VAE 输出的含义
         y = torch.concat([msk, y])
 
         @contextmanager
@@ -278,11 +291,12 @@ class WanI2V:
             # sample videos
             latent = noise
 
+            # 这里的含义，需要看 WanModel 的 forward 函数注释
             arg_c = {
-                'context': [context[0]],
-                'clip_fea': clip_context,
-                'seq_len': max_seq_len,
-                'y': [y],
+                'context': [context[0]],  # List of text embeddings each with shape [L, C]
+                'clip_fea': clip_context, # CLIP image features for image-to-video mode
+                'seq_len': max_seq_len,   # Maximum sequence length for positional encoding
+                'y': [y],                 # Conditional video inputs for image-to-video mode, shape 跟 latent 一样
             }
 
             arg_null = {
@@ -302,6 +316,7 @@ class WanI2V:
 
                 timestep = torch.stack(timestep).to(self.device)
 
+                # Classifier-Free Guidance 实现 
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0].to(
                         torch.device('cpu') if offload_model else self.device)
@@ -315,9 +330,11 @@ class WanI2V:
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
 
+                # 生成视频的 latent presentation
                 latent = latent.to(
                     torch.device('cpu') if offload_model else self.device)
 
+                # 通过采样器减去预测的“视频”噪声，起始状态是前面随机生成的 noise（全噪声）latent presentation，而不是以输入图片为起始状态
                 temp_x0 = sample_scheduler.step(
                     noise_pred.unsqueeze(0),
                     t,

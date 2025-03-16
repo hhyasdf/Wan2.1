@@ -251,6 +251,7 @@ class WanAttentionBlock(nn.Module):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
+        # 这个架构感觉跟基础的 DiT with CrossAttention Block 架构差不多
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
@@ -517,8 +518,12 @@ class WanModel(ModelMixin, ConfigMixin):
             self.freqs = self.freqs.to(device)
 
         if y is not None:
+            # zip(x, y)：首先，这会将 x 和 y 中的元素按位置对应地配对。例如，如果 x 和 y 是两个长度为 N 的列表，每个列表元素是一个 4 维张量，那么 zip(x, y) 会将 x[0] 和 y[0] 配对，x[1] 和 y[1] 配对，依此类推。
+            # torch.cat([u, v], dim=0)：u 和 v 是来自 x 和 y 对应位置的 4 维张量，torch.cat 会将它们在维度 dim=0 上拼接。dim=0 表示沿着批次维度拼接，即将两个张量的批量数据（batch_size 维度）合并。这样，如果 u 的形状是 [batch_size, channels, height, width]，v 的形状也是 [batch_size, channels, height, width]，那么拼接后的形状就是 [2 * batch_size, channels, height, width]。
+            # 相当于将 y 代表的视频拼接到 x 后面，也就是将只有一帧的 input image 视频拼接到了 noise 视频后面
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
+        # 视频的 patchify + embedding 过程，会将输入 x 代表的 （初始是全噪声 noise 视频）视频，转为二维张量，也是铺开的方式
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack(
@@ -547,6 +552,8 @@ class WanModel(ModelMixin, ConfigMixin):
                 for u in context
             ]))
 
+        # context 其实是 text 的 embedding 和 CLIP 之后的 image（视频版本）语义信息的直接拼接
+        # 然后被直接传入 cross-attention
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
             context = torch.concat([context_clip, context], dim=1)
